@@ -1,435 +1,303 @@
-"""
-app.py
-------
-Streamlit UI — False Positive Filter for game localization QA.
-Professional Engineering Edition.
+"""Langlobal Xbench false-positive review workspace. Run: streamlit run ui/app.py"""
 
-Run:
-    streamlit run ui/app.py
-"""
-
-import os
 import sys
+from html import escape
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import streamlit as st
 
-LOGO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "logo.jpeg")
-
 from ui.backend import (
-    RunConfig, default_config_from_module, apply_config,
-    process_file, build_filtered_xlsx, build_analysis_xlsx, build_zip_bytes,
-    test_api_connection,
-    get_all_models, add_custom_model, remove_model,
-    start_processing_task, ProcessingTask,
+    RunConfig, default_config_from_module, get_all_models, add_custom_model,
+    remove_model, start_processing_task, test_api_connection,
 )
-
-# ── Page config ───────────────────────────────────────────────────────────────
+from ui.presentation import (
+    LOGO, configuration_errors, duplicate_filenames, load_theme, page_header, workflow,
+)
+from ui.results import render_results
 
 st.set_page_config(
-    page_title="Xbench FP Filter — Langlobal",
-    page_icon=LOGO,
-    layout="wide",
-    initial_sidebar_state="expanded",
+    page_title="Xbench 误报筛查 · Langlobal", page_icon=LOGO,
+    layout="wide", initial_sidebar_state="expanded",
 )
-st.logo(LOGO, size="large")
-
-# ── UI 微调 (无破坏性隐藏，确保侧边栏功能正常) ──────────────────────────────────
-st.markdown("""
-<style>
-    /* Langlobal 品牌配色 — 墨黑/草绿/海蓝/纸白/蓝灰 */
-    /* 仅隐藏底部 Streamlit 水印，保留顶部 header 以确保侧边栏按钮正常工作 */
-    footer { visibility: hidden; }
-
-    /* 优化全局字体，偏向技术风格 */
-    html, body, [class*="css"] {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    }
-
-    /* 数据看板卡片规范化（纸白底 + 蓝灰描边 + 草绿顶饰） */
-    div[data-testid="stMetric"] {
-        background: #ffffff;
-        border: 1px solid #d6e0ea;
-        border-top: 3px solid #4e9d4e;
-        padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 1px 2px rgba(29, 33, 37, 0.05);
-    }
-    div[data-testid="stMetric"] label {
-        color: #3e6e96 !important;
-        font-size: 0.85rem !important;
-        font-weight: 500 !important;
-    }
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-        color: #1d2125 !important;
-        font-size: 1.6rem !important;
-        font-weight: 600 !important;
-    }
-
-    /* logo 放大（侧栏 + 折叠时顶栏）+ 整体下移 + 四角钝化 */
-    [data-testid="stSidebarLogo"],
-    [data-testid="stLogo"],
-    [data-testid="stHeaderLogo"] {
-        height: 4rem !important;
-        max-height: 4rem !important;
-        width: auto !important;
-        margin-top: 1rem !important;
-        border-radius: 12px !important;
-    }
-
-    /* 链接 / 内联 code 用品牌色 */
-    a { color: #3e6e96; }
-    code { color: #35703a; }
-
-    /* 容器描边统一蓝灰 */
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 8px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ── Session state ─────────────────────────────────────────────────────────────
+st.logo(LOGO, size="large", icon_image=LOGO)
+load_theme()
 
 if "cfg" not in st.session_state:
-    _cfg    = default_config_from_module()
-    _models = get_all_models()
-    if _models and _cfg.model not in _models:
-        _cfg.model = _models[0]
-    st.session_state.cfg = _cfg
-if "sel_model" not in st.session_state:
-    _models = get_all_models()
-    _m = st.session_state.cfg.model
-    st.session_state.sel_model = _m if _m in _models else (_models[0] if _models else "")
-if "page"           not in st.session_state:
-    st.session_state.page = "filter"
-if "results"        not in st.session_state:
-    st.session_state.results = []
-if "file_bytes_map" not in st.session_state:
-    st.session_state.file_bytes_map = {}
-if "api_status"     not in st.session_state:
-    st.session_state.api_status = None
-if "task"           not in st.session_state:
+    st.session_state.cfg = default_config_from_module()
+    if st.session_state.cfg.model not in get_all_models():
+        add_custom_model(st.session_state.cfg.model)
+for key, value in {
+    "page": "filter", "results": [], "file_bytes_map": {}, "api_status": None,
+    "task": None, "zip_cache": None, "upload_generation": 0,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+if "_pending_model" in st.session_state:
+    st.session_state.settings_model = st.session_state.pop("_pending_model")
+
+# Settle completed tasks before rendering controls, including after page navigation.
+if st.session_state.task is not None and st.session_state.task.done:
+    st.session_state.results = st.session_state.task.results
     st.session_state.task = None
-if "zip_cache"      not in st.session_state:
     st.session_state.zip_cache = None
 
-# 在任何 widget 渲染前，结算上一轮挂起的模型选择变更
-if "_pending_sel_model" in st.session_state:
-    st.session_state.sel_model = st.session_state.pop("_pending_sel_model")
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+def navigate(page: str) -> None:
+    st.session_state.page = page
+
+
+def clear_workspace() -> None:
+    st.session_state.results = []
+    st.session_state.file_bytes_map = {}
+    st.session_state.zip_cache = None
+    st.session_state.upload_generation += 1
+    for key in ("report-selection", "verdict-filter", "result-search"):
+        st.session_state.pop(key, None)
+
 
 with st.sidebar:
-    st.markdown("### Xbench FP Filter")
-    st.caption("游戏本地化 QA 误报筛查工具")
-    st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
-
-    nav_items = [
-        ("filter",   "🔍 误报筛查"),
-        ("settings", "⚙️ 参数设置"),
-        ("about",    "📖 使用说明"),
-    ]
-    for key, label in nav_items:
-        if st.button(
-            label, key=f"nav_{key}", use_container_width=True,
-            type="primary" if st.session_state.page == key else "secondary",
-        ):
-            st.session_state.page = key
-            st.rerun()
-
-    st.markdown("<div style='margin: 1.5rem 0;'></div>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Page: 误报筛查
-# ══════════════════════════════════════════════════════════════════════════════
-
-def page_filter():
-    st.markdown("### 误报筛查")
-    st.caption("上传 Xbench 报告，系统将自动识别并过滤由于排版、变量等引起的误报噪音。")
-    st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
-
-    with st.container(border=True):
-        uploaded = st.file_uploader("上传 Xbench 报告 (.xlsx)", type=["xlsx"], accept_multiple_files=True, label_visibility="collapsed")
-        
-        c_run, c_clear = st.columns([5, 1])
-        with c_run:
-            run_btn = st.button("▶ 开始筛查", type="primary", disabled=not uploaded, use_container_width=True)
-        with c_clear:
-            if st.button("🗑️ 清除", use_container_width=True, disabled=not st.session_state.results):
-                st.session_state.results = []
-                st.session_state.file_bytes_map = {}
-                st.session_state.zip_cache = None
-                st.rerun()
-
-    if not st.session_state.results and not run_btn:
-        st.info("请将需要处理的 Xbench Excel 报告拖拽至上方区域。支持多文件批量处理。")
-
-    if run_btn and uploaded:
-        files = [(uf.name, uf.read()) for uf in uploaded]
-        st.session_state.file_bytes_map = {n: d for n, d in files}
-        st.session_state.task      = start_processing_task(files, st.session_state.cfg)
-        st.session_state.results   = []
-        st.session_state.zip_cache = None
-        st.rerun()
-
-    @st.fragment(run_every=0.5)
-    def _task_progress():
-        task: ProcessingTask = st.session_state.task
-        if task is None:
-            return
-        if not task.done:
-            labels = {"parse": "解析数据", "llm": "大模型复核"}
-            st.progress(
-                task.current / max(task.total, 1),
-                text=f"总进度：{task.current + 1} / {task.total} 个文件",
+    st.markdown(
+        '<div class="sidebar-brand"><strong>Xbench QA</strong>'
+        '<span>误报筛查工具</span></div>'
+        '<div class="sidebar-label">工作区</div>', unsafe_allow_html=True,
+    )
+    with st.container(key="navigation"):
+        for page, label, icon in [
+            ("filter", "误报筛查", ":material/fact_check:"),
+            ("settings", "参数设置", ":material/tune:"),
+            ("about", "使用说明", ":material/help_outline:"),
+        ]:
+            st.button(
+                label, key=f"nav_{page}", icon=icon, width="stretch",
+                type="primary" if st.session_state.page == page else "secondary",
+                on_click=navigate, args=(page,),
             )
-            if task.stage_total:
-                pct = min(1.0, task.stage_done / task.stage_total)
-                st.progress(pct)
-                st.caption(
-                    f"**{task.current_name}**　"
-                    f"{labels.get(task.stage, task.stage)} "
-                    f"{task.stage_done} / {task.stage_total} 条"
+    sidebar_note = st.container(key="sidebar-note")
+
+
+@st.fragment(run_every=0.5)
+def task_progress() -> None:
+    task = st.session_state.task
+    if task is None:
+        return
+    if task.done:
+        st.rerun()
+    with st.container(border=True):
+        st.markdown("**正在筛查，请保留当前页面**")
+        st.progress(
+            min(task.current / max(task.total, 1), 1.0),
+            text=f"处理第 {min(task.current + 1, task.total)} / {task.total} 份报告",
+        )
+        st.text(task.current_name)
+        if task.stage_total:
+            label = {"parse": "解析报告", "llm": "模型复核"}.get(task.stage, "准备中")
+            st.progress(
+                min(task.stage_done / task.stage_total, 1.0),
+                text=f"{label} · {task.stage_done} / {task.stage_total} 条",
+            )
+
+
+def render_run_settings() -> None:
+    cfg = st.session_state.cfg
+    ready = not configuration_errors(cfg)
+    status = st.session_state.api_status
+    state = "连接已验证" if status and status[0] else "连接失败" if status else "连接未测试"
+    state_class = "error" if status and not status[0] else "ready" if ready else ""
+    with st.container(border=True, key="run-settings"):
+        st.subheader("本次筛查设置")
+        st.markdown(
+            '<div class="run-fact"><small>复核模型</small>'
+            f'<strong>{escape(cfg.model)}</strong></div>'
+            '<div class="run-fact"><small>并发条目</small>'
+            f'<strong>{cfg.max_workers} 条</strong></div>'
+            f'<span class="config-state {state_class}">'
+            f'{"API 已配置" if ready else "API 待配置"} · {state}</span>',
+            unsafe_allow_html=True,
+        )
+        st.button(
+            "调整参数", icon=":material/arrow_forward:", width="stretch",
+            on_click=navigate, args=("settings",),
+        )
+        st.caption("按当前模型逐条复核；调用失败的条目会保留在报告中。")
+
+
+def page_filter() -> None:
+    page_header("误报筛查", "上传 Xbench 报告，复核误报，保留需要继续处理的条目。")
+    busy = st.session_state.task is not None
+    workflow(1 if busy else 2 if st.session_state.results else 0)
+    main, aside = st.columns([2.5, 1], gap="medium")
+    with main:
+        with st.container(border=True, key="import-panel"):
+            st.subheader("导入报告")
+            st.caption("支持 .xls 和 .xlsx，可同时上传多份报告；旧版 .xls 的处理结果统一导出为 .xlsx。")
+            uploaded = st.file_uploader(
+                "Xbench 报告", type=["xlsx", "xls"], accept_multiple_files=True,
+                label_visibility="collapsed", disabled=busy,
+                key=f"reports-{st.session_state.upload_generation}",
+            )
+            duplicates = duplicate_filenames(uploaded)
+            if duplicates:
+                st.error("这些报告导出后会重名，请修改文件名后重新上传：" + "、".join(duplicates))
+            ready = not configuration_errors(st.session_state.cfg)
+            if not ready:
+                st.info("先在「参数设置」中填写 API Key 和接口地址，再开始筛查。", icon=":material/key:")
+            if uploaded:
+                size_mb = sum(f.size for f in uploaded) / 1024 / 1024
+                st.caption(f"已选择 {len(uploaded)} 份报告 · {size_mb:.2f} MB")
+            run_col, clear_col = st.columns([1.2, 1])
+            with run_col:
+                run = st.button(
+                    "正在筛查…" if busy else "开始筛查", icon=":material/play_arrow:",
+                    type="primary", width="stretch",
+                    disabled=busy or not uploaded or not ready or bool(duplicates),
                 )
-            else:
-                st.caption(f"正在初始化：{task.current_name}")
-        else:
-            st.session_state.results   = task.results
-            st.session_state.task      = None
-            st.session_state.zip_cache = None
-            st.rerun()
+            with clear_col:
+                st.button(
+                    "清空文件与结果", icon=":material/restart_alt:", width="stretch",
+                    disabled=busy or not (uploaded or st.session_state.results),
+                    on_click=clear_workspace,
+                )
+    with aside:
+        render_run_settings()
 
-    if st.session_state.task is not None:
-        _task_progress()
-
-    if st.session_state.results:
-        st.markdown("<div style='margin: 1.5rem 0;'></div>", unsafe_allow_html=True)
-        
-        total_items, total_supp, total_kept = 0, 0, 0
-        summary_data = []
-        
-        for r in st.session_state.results:
-            s = r.get("stats", {})
-            t_count = s.get("total", 0)
-            s_count = s.get("suppressed", 0)
-            k_count = s.get("kept", 0)
-            
-            total_items += t_count
-            total_supp += s_count
-            total_kept += k_count
-            
-            summary_data.append({
-                "filename": r["filename"],
-                "total": t_count,
-                "suppressed": s_count,
-                "kept": k_count,
-                "rate": f"{s_count / t_count * 100:.1f}%" if t_count else "—",
-                "status": "异常" if r.get("error") else "正常"
-            })
-            
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("处理文件数", f"{len(st.session_state.results)}")
-        m2.metric("报错总条数", f"{total_items}")
-        m3.metric("拦截误报数", f"{total_supp}")
-        m4.metric("平均过滤率", f"{total_supp / total_items * 100:.1f}%" if total_items else "0.0%")
-        
-        st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
-        
-        st.dataframe(
-            summary_data, use_container_width=True, hide_index=True,
-            column_config={
-                "filename": st.column_config.TextColumn("文件名", width="large"),
-                "total": st.column_config.NumberColumn("总行数"),
-                "suppressed": st.column_config.NumberColumn("过滤误报"),
-                "kept": st.column_config.NumberColumn("保留错漏"),
-                "rate": st.column_config.TextColumn("过滤率"),
-                "status": st.column_config.TextColumn("处理状态")
-            }
+    if run:
+        files = [(file.name, file.getvalue()) for file in uploaded]
+        st.session_state.file_bytes_map = dict(files)
+        st.session_state.results = []
+        st.session_state.zip_cache = None
+        cfg = RunConfig.from_dict(st.session_state.cfg.to_dict())
+        st.session_state.task = start_processing_task(files, cfg)
+        st.rerun()
+    if busy:
+        task_progress()
+    elif st.session_state.results:
+        render_results()
+    else:
+        st.markdown(
+            '<div class="deliverables">'
+            '<div><strong>过滤后报告</strong><p>删除判为误报的条目，保留原报告的红字高亮与格式，供后续修正。</p></div>'
+            '<div><strong>分析总表</strong><p>保留全部条目、模型判定及复核依据，方便抽查与回溯。</p></div>'
+            '</div>', unsafe_allow_html=True,
         )
 
-        st.divider()
 
-        st.markdown("#### 数据导出")
-        
-        valid_results = [r for r in st.session_state.results if r.get("rows") and not r.get("error")]
-        
-        if valid_results:
-            if st.session_state.zip_cache is None:
-                st.session_state.zip_cache = build_zip_bytes(st.session_state.results, st.session_state.file_bytes_map)
-            st.download_button("📦 批量下载全部结果 (.ZIP)", data=st.session_state.zip_cache, file_name="Xbench_Filtered_Results.zip", mime="application/zip", use_container_width=True)
-            st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
-            
-            selected_file = st.selectbox("单文件导出：", [r["filename"] for r in valid_results], label_visibility="collapsed")
-            
-            if selected_file:
-                r_item = next((x for x in valid_results if x["filename"] == selected_file), None)
-                if not r_item:
-                    st.rerun()
-                orig_bytes = st.session_state.file_bytes_map.get(selected_file)
-                stem = os.path.splitext(selected_file)[0]
-                
-                c_dl_left, c_dl_right = st.columns(2)
-                with c_dl_left:
-                    with st.container(border=True):
-                        st.markdown("**1. 过滤后报告**")
-                        st.caption("仅保留有效错漏，用于下发执行修正。")
-                        if orig_bytes:
-                            st.download_button(f"下载 {stem}_filtered.xlsx", data=build_filtered_xlsx(orig_bytes, r_item["rows"]), file_name=f"{stem}_filtered.xlsx", use_container_width=True)
-                with c_dl_right:
-                    with st.container(border=True):
-                        st.markdown("**2. 分析总表**")
-                        st.caption("包含完整行数据与模型复核依据，用于复盘。")
-                        st.download_button(f"下载 {stem}_analysis.xlsx", data=build_analysis_xlsx(r_item["rows"]), file_name=f"{stem}_analysis.xlsx", use_container_width=True)
-
-        st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
-        with st.expander("在线数据明细", expanded=False):
-            sel_preview = st.selectbox("选择文件", [r["filename"] for r in st.session_state.results], key="detail_sel", label_visibility="collapsed")
-            if sel_preview:
-                r_prev = next((x for x in st.session_state.results if x["filename"] == sel_preview), None)
-                if not r_prev:
-                    st.rerun()
-                
-                # 数据安全处理，防止 None 值导致渲染报错
-                rows_display = [{
-                    "Verdict": row.verdict or "—",
-                    "Source": str(row.source_text) if row.source_text else "—",
-                    "Target": str(row.target_text) if row.target_text else "—",
-                    "Error": str(row.error_description) if row.error_description else "—",
-                    "Reason": str(row.llm_analysis) if row.llm_analysis else "—",
-                } for row in (r_prev.get("rows") or [])]
-                
-                if rows_display:
-                    st.dataframe(
-                        rows_display, use_container_width=True, height=350,
-                        column_config={
-                            "Verdict": st.column_config.TextColumn("系统判定", width="small"),
-                            "Source": st.column_config.TextColumn("原文", width="medium"),
-                            "Target": st.column_config.TextColumn("译文", width="medium"),
-                            "Error": st.column_config.TextColumn("报错类别", width="small"),
-                            "Reason": st.column_config.TextColumn("复核依据", width="large")
-                        }
-                    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Page: 参数设置
-# ══════════════════════════════════════════════════════════════════════════════
-
-def page_settings():
-    st.markdown("### 参数设置")
-    st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
-    
+def page_settings() -> None:
+    page_header("参数设置", "配置复核接口与模型，应用后用于下一次筛查。")
     cfg = st.session_state.cfg
-    
-    with st.container(border=True):
-        st.markdown("**API 接口配置**")
-        api_key = st.text_input("API Key", value=cfg.api_key, type="password")
-        api_base = st.text_input("Base URL", value=cfg.api_base)
-        
-        st.markdown("<div style='margin: 1.5rem 0;'></div>", unsafe_allow_html=True)
-        st.markdown("**模型选择**")
-
-        all_models = get_all_models()
-        if not st.session_state.sel_model or st.session_state.sel_model not in all_models:
-            st.session_state.sel_model = cfg.model if cfg.model in all_models else (all_models[0] if all_models else "")
-
-        col_m1, col_m2, col_m3, col_m4 = st.columns([3, 2, 1, 1])
-        with col_m1:
-            if all_models:
-                st.selectbox("选择模型", all_models, key="sel_model", label_visibility="collapsed")
+    busy = st.session_state.task is not None
+    if busy:
+        st.info("报告正在筛查，完成后即可修改参数。")
+    for key, value in {
+        "settings_key": cfg.api_key, "settings_base": cfg.api_base,
+        "settings_model": cfg.model, "settings_temperature": cfg.temperature,
+        "settings_workers": cfg.max_workers,
+    }.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+    models = get_all_models()
+    if st.session_state.settings_model not in models:
+        st.session_state.settings_model = models[0]
+    left, right = st.columns([2.2, 1], gap="medium")
+    with left:
+        with st.container(border=True, key="api-panel"):
+            st.subheader("API 接口")
+            api_key = st.text_input("API Key", key="settings_key", type="password", disabled=busy)
+            api_base = st.text_input(
+                "Base URL", key="settings_base", disabled=busy,
+                help="填写服务商提供的 OpenAI 兼容接口地址，通常以 /v1 结尾。",
+            )
+            model = st.selectbox("复核模型", models, key="settings_model", disabled=busy)
+            with st.expander("管理模型列表"):
+                new_model = st.text_input("模型 ID", placeholder="填写服务商提供的模型 ID", key="new-model", disabled=busy)
+                add_col, del_col = st.columns(2)
+                add = add_col.button("添加模型", icon=":material/add:", width="stretch", disabled=busy or not new_model.strip())
+                delete = del_col.button(
+                    "移除当前模型", icon=":material/remove:", width="stretch",
+                    disabled=busy or len(models) <= 1,
+                    help="从列表中移除选中的模型，可随时重新添加。",
+                )
+                if add:
+                    add_custom_model(new_model.strip())
+                    st.session_state._pending_model = new_model.strip()
+                    st.rerun()
+                if delete:
+                    remove_model(model)
+                    st.session_state._pending_model = get_all_models()[0]
+                    st.rerun()
+        with st.container(border=True, key="engine-panel"):
+            st.subheader("执行参数")
+            temp_col, worker_col = st.columns(2)
+            temperature = temp_col.slider(
+                "Temperature", 0.0, 1.0, step=0.05, key="settings_temperature", disabled=busy,
+                help="控制输出的随机程度，建议先使用 0.3。",
+            )
+            max_workers = worker_col.number_input(
+                "并发条目数", 1, 64, key="settings_workers", disabled=busy,
+                help="接口频繁限流时，可降低此数值。",
+            )
+        draft = RunConfig(
+            api_key=api_key.strip(), api_base=api_base.strip(), model=model,
+            temperature=temperature, max_tokens=cfg.max_tokens, max_workers=max_workers,
+        )
+        apply_col, test_col = st.columns(2)
+        apply = apply_col.button("应用设置", type="primary", icon=":material/check:", width="stretch", disabled=busy)
+        test = test_col.button("应用并测试连接", icon=":material/wifi_tethering:", width="stretch", disabled=busy)
+        if apply or test:
+            errors = configuration_errors(draft)
+            if errors:
+                for error in errors:
+                    st.error(error)
             else:
-                st.text_input("模型名称", key="sel_model", label_visibility="collapsed")
-        with col_m2:
-            new_model = st.text_input("添加模型", placeholder="模型 ID", label_visibility="collapsed")
-        with col_m3:
-            add_clicked = st.button("添加", use_container_width=True)
-        with col_m4:
-            del_clicked = st.button("删除", use_container_width=True, disabled=len(all_models) <= 1,
-                                    help="删除当前选中的模型（预置模型将被隐藏，可再次添加恢复）")
-
-        if add_clicked and new_model.strip():
-            add_custom_model(new_model.strip())
-            st.session_state._pending_sel_model = new_model.strip()
-            st.rerun()
-        if del_clicked:
-            remove_model(st.session_state.sel_model)
-            remaining = get_all_models()
-            st.session_state._pending_sel_model = remaining[0] if remaining else ""
-            st.rerun()
-
-    with st.container(border=True):
-        st.markdown("**引擎执行参数**")
-        c_temp, c_work = st.columns(2)
-        with c_temp:
-            temperature = st.slider("Temperature (建议维持在 0.3 左右以保证判断稳定性)", 0.0, 1.0, cfg.temperature, 0.05)
-        with c_work:
-            max_workers = st.number_input("并发线程数 (受限于 API 并发配额)", 1, 64, cfg.max_workers)
-        max_tokens = cfg.max_tokens
-
-    effective_model = st.session_state.sel_model or (all_models[0] if all_models else cfg.model)
-    new_cfg = RunConfig(
-        api_key=api_key, api_base=api_base, model=effective_model,
-        temperature=temperature, max_tokens=max_tokens, max_workers=max_workers,
-    )
-    st.session_state.cfg = new_cfg
-    try:
-        apply_config(new_cfg)
-    except Exception:
-        pass
-
-    st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
-    if st.button("测试连接", use_container_width=True):
-        with st.spinner("连接中..."):
-            ok, msg = test_api_connection(new_cfg)
-        st.session_state.api_status = (ok, msg)
-        if ok: st.success("连接正常")
-        else: st.error(f"连接异常：{msg}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Page: 使用说明
-# ══════════════════════════════════════════════════════════════════════════════
-
-def page_about():
-    st.markdown("### 使用说明")
-    st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
-    
-    with st.container(border=True):
-        st.markdown("""
-        **操作流程：**
-        
-        1. **环境准备**：在「参数设置」页配置大模型 API Key。建议点击“测试连接”确认网络畅通。
-        2. **数据处理**：在「误报筛查」页上传 Xbench 导出的原始 `.xlsx` 报错报告，点击“开始筛查”。系统支持多文件并发处理。
-        3. **获取产出物**：
-           * **过滤后报告**：直接剔除大模型判断为误报的行，保留真实的质量问题，供 QA/翻译人员处理。
-           * **分析总表**：包含原始数据的全部行及大模型的复核依据，用于流程复盘和规则追溯。
-           
-        *注：若处理过程中频繁出现接口限流错误 (Rate Limit)，请在参数设置中适当调低“并发线程数”。*
-        """)
-
-# ── Router ────────────────────────────────────────────────────────────────────
-
-{
-    "filter":   page_filter,
-    "settings": page_settings,
-    "about":    page_about,
-}.get(st.session_state.page, page_filter)()
-
-# ── Sidebar status (rendered after page fn updates cfg) ───────────────────────
-
-with st.sidebar:
-    cfg = st.session_state.cfg
-    with st.container(border=True):
-        st.markdown("**运行环境状态**")
-        st.markdown(f"- 模型: `{cfg.model}`")
-        st.markdown(f"- 并发: `{cfg.max_workers}` 线程")
-
+                st.session_state.cfg = draft
+                st.session_state.api_status = None
+                if test:
+                    with st.spinner("正在测试连接…"):
+                        st.session_state.api_status = test_api_connection(draft)
+                else:
+                    st.success("设置已应用，下次筛查将使用此配置。")
         status = st.session_state.api_status
-        if status is None:
-            st.markdown("- API: `🔘 未测试`")
-        elif status[0]:
-            st.markdown("- API: `🟢 正常`")
-        else:
-            st.markdown("- API: `🔴 异常`")
+        if status and draft == st.session_state.cfg:
+            if status[0]:
+                st.success(status[1], icon=":material/check_circle:")
+            else:
+                st.error(status[1], icon=":material/error:")
+        elif draft != st.session_state.cfg:
+            st.caption("设置有改动，点击「应用设置」后生效。")
+        st.caption("设置仅在当前会话有效，重启后恢复默认配置。")
+    with right:
+        with st.container(border=True, key="settings-help"):
+            st.markdown("**配置提示**")
+            st.caption("API Key 和 Base URL 需来自同一服务商，模型 ID 需与该接口支持的名称一致。")
+            st.divider()
+            st.markdown("**遇到限流时**")
+            st.caption("先降低并发条目数，再重新筛查。测试连接会发送一条简短请求。")
+            st.button("返回误报筛查", icon=":material/arrow_back:", on_click=navigate, args=("filter",), width="stretch")
+
+
+def page_about() -> None:
+    page_header("使用说明", "从 Xbench 报告到可追溯的误报复核结果。")
+    with st.container(border=True, key="guide-panel"):
+        for number, title, description in [
+            ("01", "配置复核接口", "进入「参数设置」，填写 API Key、Base URL 并选择模型。点击「应用并测试连接」确认配置。"),
+            ("02", "上传并开始筛查", "上传 Xbench 导出的 .xls 或 .xlsx 报告，支持多份文件。点击「开始筛查」，页面会显示逐文件、逐条目的处理进度。旧版 .xls 会自动转换，结果统一导出为 .xlsx。"),
+            ("03", "查看判定与下载", "在结果明细中按误报或保留复核筛选，也可搜索原文、译文及复核依据。抽查后下载过滤后报告和分析总表，或一键打包全部结果。"),
+        ]:
+            st.markdown(
+                f'<div class="guide-step"><span>{number}</span><div><strong>{title}</strong>'
+                f'<p>{description}</p></div></div>', unsafe_allow_html=True,
+            )
+    with st.expander("两种导出文件有什么区别？", expanded=True):
+        st.markdown("**过滤后报告**：删除判为误报的条目，保留待处理条目及原有红字、行高等格式。\n\n**分析总表**：包含全部条目、模型判定及判定依据，用于抽查和复盘。")
+    with st.expander("调用失败或没有结果时怎么办？"):
+        st.markdown("单条模型调用失败时，该条目默认保留，可在分析总表中查看原因。文件解析失败会单独显示，其他文件继续处理。检查报告格式或 API 设置后，重新上传筛查即可。")
+    st.button("开始使用", type="primary", icon=":material/arrow_forward:", on_click=navigate, args=("filter",))
+
+
+{"filter": page_filter, "settings": page_settings, "about": page_about}.get(
+    st.session_state.page, page_filter,
+)()
+with sidebar_note:
+    st.caption("正在处理报告" if st.session_state.task is not None else "本地运行 · 当前会话")
+    st.caption("Langlobal · Localization tools")

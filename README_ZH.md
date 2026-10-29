@@ -26,7 +26,19 @@ streamlit run ui/app.py
 
 首次运行前在 Streamlit「参数设置」页填入 API Key 和 Base URL。
 
-完整安装、手动操作、Agent 指令、验收与故障恢复见 [PM 使用指南](docs/PM使用指南_Xbench误报筛查.html)。
+安装、操作与常见问题见 [使用说明](使用说明.txt)，工具页面内也提供「使用说明」。
+
+### 2026-10-21 更新
+
+- 修正带内嵌主题 ZIP 的 `.xls` 格式识别：先按文件头识别 OLE 工作簿，再检查 ZIP 内是否存在 Excel 工作簿，避免误报 `File contains no valid workbook part`。
+- 兼容 Xbench 导出的 Excel 97–2003 `.xls` 和 `.xlsx` 报告；旧版报告自动转换后筛查，结果统一导出为 `.xlsx`，保留报告文本、红字及常用表格格式。
+- 同名 `.xls` / `.xlsx` 报告会提示重命名，避免生成重名的结果文件。启动时会自动检查并安装旧版 Excel 读取依赖。
+- Windows 启动脚本统一为 UTF-8（无 BOM）与 CRLF，在输出中文前执行 `chcp 65001`，同时设置 Python 的 UTF-8 输出。
+- 界面与 Langlobal 翻译工作台统一配色、字体和品牌图标；新增处理步骤、结果筛选、搜索及单文件下载。
+- 处理中锁定上传、重复启动和清空；清空会同时重置文件与结果。文件失败单独提示，后续文件继续处理。
+- 「参数设置」改为明确应用后生效，测试连接限时 15 秒且不自动重试；设置在当前会话有效，重启后恢复默认值。
+
+截图中的黄色 pip `Scripts ... not on PATH` 是路径提示，与中文乱码无关。本工具通过 `python -m pip`、`python -m streamlit` 调用，无需额外把该目录加入 PATH。
 
 ---
 

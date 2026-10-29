@@ -109,7 +109,7 @@ def process_file(
     on_progress: Optional[Callable] = None,
 ) -> dict:
     """
-    Process one Xbench xlsx: parse + LLM review each row.
+    Process one Xbench XLS/XLSX: normalize, parse, then review each row.
 
     on_progress(stage, done, total)
       stage: "parse" | "llm"
@@ -117,14 +117,18 @@ def process_file(
     Returns:
       filename, rows (list[RowResult]), stats, error
     """
-    apply_config(cfg)
-
+    from core.excel_compat import normalize_report_bytes
     from core.xbench import parse
     from core.llm_review import llm_secondary_review
 
     # ── Parse ──────────────────────────────────────────────────────────────
     if on_progress:
         on_progress("parse", 0, 1)
+
+    try:
+        file_bytes = normalize_report_bytes(file_bytes)
+    except Exception as e:
+        return {"filename": filename, "rows": [], "stats": {}, "error": f"解析失败：{e}"}
 
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tf:
         tf.write(file_bytes)
@@ -145,6 +149,7 @@ def process_file(
                 "error": "无有效数据行"}
 
     # ── LLM review (async + semaphore) ────────────────────────────────────
+    apply_config(cfg)
     if on_progress:
         on_progress("llm", 0, len(valid_rows))
 
@@ -207,8 +212,12 @@ def build_filtered_xlsx(file_bytes: bytes, row_results: list[RowResult]) -> byte
     Uses xbench.filter_xlsx internally.
     """
     from core.xbench import filter_xlsx
+    from core.excel_compat import normalize_report_bytes
 
-    keep_rows = {r.row_num for r in row_results if r.verdict == "真错误"}
+    file_bytes = normalize_report_bytes(file_bytes)
+
+    # Only an explicit false-positive verdict permits deleting a report row.
+    keep_rows = {r.row_num for r in row_results if r.verdict != "误报"}
 
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tf:
         tf.write(file_bytes)
@@ -372,21 +381,26 @@ def start_processing_task(
     task = ProcessingTask([name for name, _ in files])
 
     def _worker():
-        for i, (name, data) in enumerate(files):
-            task.current     = i
-            task.stage       = ""
-            task.stage_done  = 0
-            task.stage_total = 0
+        try:
+            for i, (name, data) in enumerate(files):
+                task.current     = i
+                task.stage       = ""
+                task.stage_done  = 0
+                task.stage_total = 0
 
-            def on_progress(stage, done, total):
-                task.stage       = stage
-                task.stage_done  = done
-                task.stage_total = total
+                def on_progress(stage, done, total):
+                    task.stage       = stage
+                    task.stage_done  = done
+                    task.stage_total = total
 
-            result = process_file(data, name, cfg, on_progress)
-            task.results.append(result)
-
-        task._done_event.set()
+                try:
+                    result = process_file(data, name, cfg, on_progress)
+                except Exception as exc:
+                    result = {"filename": name, "rows": [], "stats": {},
+                              "error": f"筛查失败：{exc}"}
+                task.results.append(result)
+        finally:
+            task._done_event.set()
 
     threading.Thread(target=_worker, daemon=True).start()
     return task
@@ -398,13 +412,14 @@ def test_api_connection(cfg: RunConfig) -> tuple[bool, str]:
     """Send a minimal request to verify API key + base URL. Returns (ok, message)."""
     from openai import OpenAI, AuthenticationError, APIConnectionError
     try:
-        client = OpenAI(api_key=cfg.api_key, base_url=cfg.api_base)
-        resp   = client.chat.completions.create(
-            model=cfg.model,
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=5,
-            temperature=0,
-        )
+        with OpenAI(api_key=cfg.api_key, base_url=cfg.api_base,
+                    timeout=15, max_retries=0) as client:
+            resp = client.chat.completions.create(
+                model=cfg.model,
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=5,
+                temperature=0,
+            )
         return True, f"连接成功 · 模型：{resp.model}"
     except AuthenticationError:
         return False, "认证失败：API Key 无效"

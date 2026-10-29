@@ -10,9 +10,15 @@
 
 1. 解压到任意目录
 2. 双击 run.bat
-3. 首次运行自动安装环境 → 浏览器打开 Streamlit
-4. 在「参数设置」页输入 API Key 和 Base URL
-5. 回到「文件处理」页上传 Xbench 报告 → 开始过滤
+3. 首次运行自动安装环境；完成后自动打开工具页面，请保留启动窗口
+4. 在「参数设置」页输入 API Key、Base URL 和模型，点击「应用并测试连接」
+5. 回到「误报筛查」页上传 Xbench .xls 或 .xlsx 报告，点击「开始筛查」
+6. 查看判定、按误报或保留复核筛选，抽查后下载过滤后报告、分析总表或全部结果 ZIP
+
+设置仅在当前会话有效；重启后恢复 config.py 中的默认配置。
+旧版 .xls 会自动转换，处理结果统一导出为 .xlsx，原文件不变。
+同名的 .xls 和 .xlsx 导出后会重名，请先修改其中一个文件名再同时上传。
+请将新版解压到独立目录，确认正常后再替换旧版。原有 API 配置可手动复制到新版 config.py。
 
 ## 文件说明
 
@@ -24,9 +30,25 @@
 
 ## 常见问题
 
+Q: .xls 提示 File contains no valid workbook part？
+A: 请使用包含「内嵌主题识别修复」的新版包。部分标准 .xls 内带主题 ZIP 数据，
+   旧版可能误判为 .xlsx；新版会先识别真正的工作簿格式，再读取报告。
+
+Q: 上传 .xls 提示 application/vnd.ms-excel files are not allowed？
+A: 旧版页面只接收 .xlsx。请使用本次包含 .xls 兼容修复的完整新版包。
+   无需手动修改文件扩展名。新版 run.bat 会检查旧版 Excel 读取组件，缺失时自动安装。
+
 Q: 缺少 DLL / 无法启动 Python？
 A: 安装 Visual C++ Redistributable：
    https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+Q: 安装窗口中文乱码？
+A: 使用本次更新的 run.bat 与 setup.bat。新版会在输出中文前启用 UTF-8，
+   请勿用旧脚本覆盖新版；不要将 .bat 另存为带 BOM 的 UTF-8。
+
+Q: pip 提示 Scripts 不在 PATH 中？
+A: 新版安装时已抑制此路径提示；工具使用 python -m 调用，
+   无需额外修改系统 PATH。
 
 Q: API 连接失败？
 A: 检查「参数设置」页的 API Base URL 是否正确，

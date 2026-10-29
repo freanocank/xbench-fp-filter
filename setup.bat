@@ -1,57 +1,65 @@
 @echo off
-cd /d "%~dp0"
+chcp 65001 >nul
+setlocal EnableExtensions DisableDelayedExpansion
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+pushd "%~dp0"
+if errorlevel 1 exit /b 1
 echo ============================================
 echo   Xbench FP Filter - 初始化设置
 echo ============================================
 echo.
 
-REM -- 步骤 1：下载内嵌 Python（已存在则跳过）--
-if not exist python\python.exe (
-    echo [1/3] 下载 Python 运行环境（约 10MB，需要网络）...
-    powershell -Command "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile 'python_embed.zip' -UseBasicParsing"
-    if errorlevel 1 (
-        echo 下载失败，请检查网络连接后重试。
-        pause & exit /b 1
-    )
-    echo 正在解压...
-    powershell -Command "Expand-Archive -Path 'python_embed.zip' -DestinationPath 'python' -Force"
-    del python_embed.zip
+REM Download the embedded runtime only when it is missing.
+if not exist "python\python.exe" (
+    echo [1/3] 下载 Python 运行环境，需要网络连接...
+    powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile 'python_embed.zip' -UseBasicParsing"
+    if errorlevel 1 goto failed
+    powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath 'python_embed.zip' -DestinationPath 'python' -Force"
+    if errorlevel 1 goto failed
+    del "python_embed.zip"
+) else (
+    echo [1/3] Python 运行环境已就绪。
 )
 
-REM -- 步骤 1b：启用 site-packages。通配符 *.pth 匹配不到 python311._pth，必须用 python*._pth --
-powershell -Command "Get-ChildItem 'python\python*._pth' | ForEach-Object { (Get-Content $_) -replace '#import site','import site' | Set-Content $_ -Encoding Ascii }"
+REM The embedded runtime uses python*._pth, not *.pth.
+powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; Get-ChildItem 'python\python*._pth' | ForEach-Object { (Get-Content -LiteralPath $_.FullName) -replace '^#import site','import site' | Set-Content -LiteralPath $_.FullName -Encoding Ascii }"
+if errorlevel 1 goto failed
 
-REM -- 步骤 2：确保 pip 可用（半装环境可自愈）--
-python\python.exe -m pip --version >nul 2>&1
+"python\python.exe" -m pip --version >nul 2>nul
 if errorlevel 1 (
     echo 安装 pip...
-    powershell -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile 'get_pip.py' -UseBasicParsing"
-    python\python.exe get_pip.py --quiet
-    del get_pip.py
+    powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile 'get_pip.py' -UseBasicParsing"
+    if errorlevel 1 goto failed
+    "python\python.exe" get_pip.py --quiet --no-warn-script-location
+    if errorlevel 1 goto failed
+    del "get_pip.py"
 )
 
-REM -- 步骤 3：安装依赖 --
 echo.
-echo [2/3] 安装依赖包（首次约 2-3 分钟）...
-python\python.exe -m pip install -r requirements.txt -q
-if errorlevel 1 (
-    echo 依赖安装失败，请检查网络连接后重试。
-    pause & exit /b 1
-)
+echo [2/3] 安装依赖包，首次运行可能需要几分钟...
+"python\python.exe" -m pip install -r requirements.txt --quiet --no-warn-script-location
+if errorlevel 1 goto failed
 
-REM -- 步骤 4：生成配置文件 --
 echo.
 echo [3/3] 检查配置文件...
-if not exist config.py (
-    copy config_template.py config.py >nul
-    echo config.py 已生成。
+if not exist "config.py" (
+    copy /y "config_template.py" "config.py" >nul
+    if errorlevel 1 goto failed
+    echo 默认配置已生成，可在页面中填写 API Key。
 ) else (
-    echo config.py 已存在，跳过。
+    echo 配置文件已存在。
 )
 
 echo.
-echo ============================================
-echo   设置完成！双击 run.bat 启动工具。
-echo ============================================
+echo 设置完成！双击 run.bat 启动工具。
+if /i not "%~1"=="--from-launcher" pause
+popd
+exit /b 0
+
+:failed
 echo.
-pause
+echo 安装失败，请查看上方错误信息，检查网络后重新运行 setup.bat。
+if /i not "%~1"=="--from-launcher" pause
+popd
+exit /b 1

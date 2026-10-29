@@ -18,6 +18,15 @@ data/
 # 敏感配置文件（含 API KEY）
 config.py
 
+# Local verification and Python environments
+.venv/
+venv/
+python/
+.pytest_cache/
+.playwright-cli/
+output/
+outputs/
+
 # 内部记录，不公开
 docs/dailies/
 docs/annotation_requirements/

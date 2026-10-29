@@ -20,7 +20,17 @@ English | [中文](README_ZH.md)
 
  Prepare the Xbench Excel report, API configuration, and output directory as described below.
 
- PM setup, manual operation, agent prompts, acceptance, and recovery: [PM Usage Guide (Chinese)](docs/PM使用指南_Xbench误报筛查.html).
+ Setup, operation, and recovery: [Usage notes (Chinese)](使用说明.txt) or the in-app usage guide.
+
+### 2026-10-21 update
+
+- Detects the outer OLE workbook before testing for ZIP content. This prevents XLS files containing embedded theme ZIPs from being misidentified as XLSX and failing with `File contains no valid workbook part`.
+- Supports Excel 97–2003 `.xls` and `.xlsx` Xbench reports. Legacy workbooks are converted before review; exports use `.xlsx`, retaining report text, rich-text highlights, and common cell formatting.
+- Detects mixed-format filenames that would collide on export, and checks for the legacy Excel reader during Windows startup.
+- Windows launchers now select UTF-8 before Chinese output, set Python UTF-8 output, and retain BOM-free UTF-8 with CRLF in distribution packages.
+- The UI follows the Langlobal workspace palette, system fonts, and logo treatment, with result filters, search, and individual report downloads.
+- Running tasks lock upload/restart/reset actions. File failures are reported independently and do not block later files.
+- Settings require an explicit Apply action and last for the current session. Connection checks have a 15-second timeout with no automatic retries.
 
 ## Notes
 
